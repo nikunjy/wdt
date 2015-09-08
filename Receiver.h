@@ -35,7 +35,7 @@ class ReceiverThread;
  * accepts connections, receives the files and writes to the destination
  * directory. Receiver has two modes of operation : You can spawn a receiver
  * for one transfer or alternatively it can also be used in a long running
- * mode where it accepts subsequent transfers and runs in an infinte loop.
+ * mode where it accepts subsequent transfers and runs in an infinite loop.
  */
 class Receiver : public WdtBase {
  public:

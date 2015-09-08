@@ -311,7 +311,7 @@ std::unique_ptr<TransferReport> Sender::finish() {
             << transferReport->getThroughputMBps() << " Mbytes/sec ("
             << transferReport->getSummary().getEffectiveTotalBytes() /
                    (totalTime - directoryTime) / kMbToB
-            << " Mbytes/sec pure transf rate)";
+            << " Mbytes/sec pure transfer rate)";
   areThreadsJoined_ = true;
   return transferReport;
 }

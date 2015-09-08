@@ -135,7 +135,7 @@ class Sender : public WdtBase {
    */
   void setProgressReportIntervalMillis(const int progressReportIntervalMillis);
 
-  /// @retun    minimal transfer report using transfer stats of the thread
+  /// @return    minimal transfer report using transfer stats of the thread
   std::unique_ptr<TransferReport> getTransferReport();
 
   typedef std::unique_ptr<ClientSocket> (*SocketCreator)(
