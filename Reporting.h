@@ -303,13 +303,16 @@ class TransferReport {
                  std::vector<TransferStats> &threadStats,
                  std::vector<std::string> &failedDirectories, double totalTime,
                  int64_t totalFileSize, int64_t numDiscoveredFiles);
-
   /**
    * This function does not move the thread stats passed to it. This is called
    * by the progress reporter thread.
    */
   TransferReport(const std::vector<TransferStats> &threadStats,
                  double totalTime, int64_t totalFileSize);
+
+  TransferReport(TransferStats &&stats, double totalTime,
+                 int64_t totalFileSize);
+  explicit TransferReport(TransferStats &&stats);
 
   /// constructor used by receiver, does move the thread stats
   explicit TransferReport(std::vector<TransferStats> &threadStats);

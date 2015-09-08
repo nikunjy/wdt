@@ -17,7 +17,9 @@
 #include "Protocol.h"
 #include "Writer.h"
 #include "Throttler.h"
+#include "ReceiverThread.h"
 #include "TransferLogManager.h"
+#include "ThreadsController.h"
 #include <memory>
 #include <string>
 #include <condition_variable>
@@ -27,6 +29,7 @@
 
 namespace facebook {
 namespace wdt {
+class ReceiverThread;
 /**
  * Receiver is the receiving side of the transfer. Receiver listens on ports
  * accepts connections, receives the files and writes to the destination
@@ -99,325 +102,30 @@ class Receiver : public WdtBase {
   std::vector<int32_t> getPorts() const;
 
  protected:
+  friend class ReceiverThread;
+
+  /// Get file creator, used by receiver threads
+  std::unique_ptr<FileCreator> &getFileCreator();
+
+  /// Get the throttler this receiver is using
+  std::shared_ptr<Throttler> getThrottler() const;
+
+  /// Get the ref to transfer log manager
+  TransferLogManager &getTransferLogManager();
+
+  /// Used by receiver threads to set number of blocks sent by sender
+  void setNumBlocksSend(int64_t numBlocksSend);
+
+  /// Used by receiver threads to set number of bytes sent by sender
+  void setTotalSenderBytes(int64_t totalSenderBytes);
+
   /**
    * @param isFinished         Mark transfer active/inactive
    */
   void markTransferFinished(bool isFinished);
 
-  /**
-   * Wdt receiver has logic to maintain the consistency of the
-   * the transfers through connection errors. All threads are run by the logic
-   * defined as a state machine. These are the all the stataes in that
-   * state machine
-   */
-  enum ReceiverState {
-    LISTEN,
-    ACCEPT_FIRST_CONNECTION,
-    ACCEPT_WITH_TIMEOUT,
-    SEND_LOCAL_CHECKPOINT,
-    READ_NEXT_CMD,
-    PROCESS_FILE_CMD,
-    PROCESS_EXIT_CMD,
-    PROCESS_SETTINGS_CMD,
-    PROCESS_DONE_CMD,
-    PROCESS_SIZE_CMD,
-    SEND_FILE_CHUNKS,
-    SEND_GLOBAL_CHECKPOINTS,
-    SEND_DONE_CMD,
-    SEND_ABORT_CMD,
-    WAIT_FOR_FINISH_OR_NEW_CHECKPOINT,
-    WAIT_FOR_FINISH_WITH_THREAD_ERROR,
-    FAILED,
-    END
-  };
-
-  /**
-   * Structure to pass data to the state machine and also to share data between
-   * different state
-   */
-  struct ThreadData {
-    /// Index of the thread that this data belongs to
-    const int threadIndex_;
-
-    /**
-     * Server socket object that provides functionality such as listen()
-     * accept, read, write on the socket
-     */
-    ServerSocket &socket_;
-
-    /// Statistics of the transfer for this thread
-    TransferStats &threadStats_;
-
-    /// protocol version for this thread. This per thread protocol version is
-    /// kept separately from the global one to avoid locking
-    int threadProtocolVersion_;
-
-    /// Buffer that receivers reads data into from the network
-    std::unique_ptr<char[]> buf_;
-    /// Maximum size of the buffer
-    const int64_t bufferSize_;
-
-    /// Marks the number of bytes already read in the buffer
-    int64_t numRead_{0};
-
-    /// Following two are markers to mark how much data has been read/parsed
-    int64_t off_{0};
-    int64_t oldOffset_{0};
-
-    /// Number of bytes written for the current block
-    int64_t curBlockWrittenBytes_{0};
-
-    /// number of checkpoints already transferred
-    int checkpointIndex_{0};
-
-    /**
-     * Pending value of checkpoint count. since write call success does not
-     * gurantee actual transfer, we do not apply checkpoint count update after
-     * the write. Only after receiving next cmd from sender, we apply the
-     * update
-     */
-    int pendingCheckpointIndex_{0};
-
-    /// a counter incremented each time a new session starts for this thread
-    int64_t transferStartedCount_{0};
-
-    /// a counter incremented each time a new session ends for this thread
-    int64_t transferFinishedCount_{0};
-
-    /// read timeout for sender
-    int64_t senderReadTimeout_{-1};
-
-    /// write timeout for sender
-    int64_t senderWriteTimeout_{-1};
-
-    /// whether checksum verification is enabled or not
-    bool enableChecksum_{false};
-
-    /**
-     * Whether SEND_DONE_CMD state has already failed for this session or not.
-     * This has to be separately handled, because session barrier is
-     * implemented before sending done cmd
-     */
-    bool doneSendFailure_{false};
-
-    /// Checkpoints that have not been sent back to the sender
-    std::vector<Checkpoint> newCheckpoints_;
-
-    /// Constructor for thread data
-    ThreadData(int threadIndex, ServerSocket &socket,
-               TransferStats &threadStats, int protocolVersion,
-               int64_t bufferSize)
-        : threadIndex_(threadIndex),
-          socket_(socket),
-          threadStats_(threadStats),
-          threadProtocolVersion_(protocolVersion),
-          bufferSize_(bufferSize) {
-      buf_.reset(new char[bufferSize_]);
-    }
-
-    /**
-     * In long running mode, we need to reset thread variables after each
-     * session. Before starting each session, reset() has to called to do that.
-     */
-    void reset() {
-      numRead_ = off_ = 0;
-      checkpointIndex_ = pendingCheckpointIndex_ = 0;
-      doneSendFailure_ = false;
-      senderReadTimeout_ = senderWriteTimeout_ = -1;
-      threadStats_.reset();
-    }
-
-    /// Get the raw pointer to the buffer
-    char *getBuf() {
-      return buf_.get();
-    }
-  };
-
-  /// Overloaded operator for printing thread info
-  friend std::ostream &operator<<(std::ostream &os, const ThreadData &data);
-
-  typedef ReceiverState (Receiver::*StateFunction)(ThreadData &data);
-
-  /**
-   * Tries to listen/bind to port. If this fails, thread is considered failed.
-   * Previous states : n/a (start state)
-   * Next states : ACCEPT_FIRST_CONNECTION(success),
-   *               FAILED(failure)
-   */
-  ReceiverState listen(ThreadData &data);
-  /**
-   * Tries to accept first connection of a new session. Periodically checks
-   * whether a new session has started or not. If a new session has started then
-   * goes to ACCEPT_WITH_TIMEOUT state. Also does session initialization. In
-   * joinable mode, tries to accept for a limited number of user specified
-   * retries.
-   * Previous states : LISTEN,
-   *                   END(if in long running mode)
-   * Next states : ACCEPT_WITH_TIMEOUT(if a new transfer has started and this
-   *               thread has not received a connection),
-   *               WAIT_FOR_FINISH_WITH_THREAD_ERROR(if did not receive a
-   *               connection in specified number of retries),
-   *               READ_NEXT_CMD(if a connection was received)
-   */
-  ReceiverState acceptFirstConnection(ThreadData &data);
-  /**
-   * Tries to accept a connection with timeout. There are 2 kinds of timeout. At
-   * the beginning of the session, it uses accept window as the timeout. Later
-   * when sender settings are known it uses max(readTimeOut, writeTimeout)) +
-   * buffer(500) as the timeout.
-   * Previous states : Almost all states(for any network errors during transfer,
-   *                   we transition to this state),
-   * Next states : READ_NEXT_CMD(if there are no previous errors and accept
-   *               was successful),
-   *               SEND_LOCAL_CHECKPOINT(if there were previous errors and
-   *               accept was successful),
-   *               WAIT_FOR_FINISH_WITH_THREAD_ERROR(if accept failed and
-   *               transfer previously failed during SEND_DONE_CMD state. Thus
-   *               case needs special handling to ensure that we do not mess up
-   *               session variables),
-   *               END(if accept fails otherwise)
-   */
-  ReceiverState acceptWithTimeout(ThreadData &data);
-  /**
-   * Sends local checkpoint to the sender. In case of previous error during
-   * SEND_LOCAL_CHECKPOINT state, we send -1 as the checkpoint.
-   * Previous states : ACCEPT_WITH_TIMEOUT
-   * Next states : ACCEPT_WITH_TIMEOUT(if sending fails),
-   *               SEND_DONE_CMD(if send is successful and we have previous
-   *               SEND_DONE_CMD error),
-   *               READ_NEXT_CMD(if send is successful otherwise)
-   */
-  ReceiverState sendLocalCheckpoint(ThreadData &data);
-  /**
-   * Reads next cmd and transistions to the state accordingly.
-   * Previous states : SEND_LOCAL_CHECKPOINT,
-   *                   ACCEPT_FIRST_CONNECTION,
-   *                   ACCEPT_WITH_TIMEOUT,
-   *                   PROCESS_SETTINGS_CMD,
-   *                   PROCESS_FILE_CMD,
-   *                   SEND_GLOBAL_CHECKPOINTS,
-   * Next states : PROCESS_FILE_CMD,
-   *               PROCESS_EXIT_CMD,
-   *               PROCESS_DONE_CMD,
-   *               PROCESS_SETTINGS_CMD,
-   *               PROCESS_SIZE_CMD,
-   *               ACCEPT_WITH_TIMEOUT(in case of read failure),
-   *               WAIT_FOR_FINISH_WITH_THREAD_ERROR(in case of protocol errors)
-   */
-  ReceiverState readNextCmd(ThreadData &data);
-  /**
-   * Processes exit cmd. Wdt standalone or any application will exit after
-   * reaching this state
-   * Previous states : READ_NEXT_CMD
-   * Next states :
-   */
-  ReceiverState processExitCmd(ThreadData &data);
-  /**
-   * Processes file cmd. Logic of how we write the file to the destination
-   * directory is defined here.
-   * Previous states : READ_NEXT_CMD
-   * Next states : READ_NEXT_CMD(success),
-   *               WAIT_FOR_FINISH_WITH_THREAD_ERROR(protocol error),
-   *               ACCEPT_WITH_TIMEOUT(socket read failure)
-   */
-  ReceiverState processFileCmd(ThreadData &data);
-  /**
-   * Processes settings cmd. Settings has a connection settings,
-   * protocol version, transfer id, etc. For more info check Protocol.h
-   * Previous states : READ_NEXT_CMD,
-   * Next states : READ_NEXT_CMD(success),
-   *               WAIT_FOR_FINISH_WITH_THREAD_ERROR(protocol error),
-   *               ACCEPT_WITH_TIMEOUT(socket read failure),
-   *               SEND_FILE_CHUNKS(If the sender wants to resume transfer)
-   */
-  ReceiverState processSettingsCmd(ThreadData &data);
-  /**
-   * Processes done cmd. Also checks to see if there are any new global
-   * checkpoints or not
-   * Previous states : READ_NEXT_CMD,
-   * Next states : WAIT_FOR_FINISH_OR_ERROR(protocol error),
-   *               WAIT_FOR_FINISH_OR_NEW_CHECKPOINT(success),
-   *               SEND_GLOBAL_CHECKPOINTS(if there are global errors)
-   */
-  ReceiverState processDoneCmd(ThreadData &data);
-  /**
-   * Processes size cmd. Sets the value of totalSenderBytes_
-   * Previous states : READ_NEXT_CMD,
-   * Next states : READ_NEXT_CMD(success),
-   *               WAIT_FOR_FINISH_WITH_THREAD_ERROR(protocol error)
-   */
-  ReceiverState processSizeCmd(ThreadData &data);
-  /**
-   * Sends file chunks that were received successfully in any previous transfer,
-   * this is the first step in download resumption.
-   * Checks to see if they have already been transferred or not.
-   * If yes, send ACK. If some other thread is sending it, sends wait cmd
-   * and checks again later. Otherwise, breaks the entire data into bufferSIze_
-   * chunks and sends it.
-   * Previous states: PROCESS_SETTINGS_CMD,
-   * Next states : ACCEPT_WITH_TIMEOUT(network error),
-   *               READ_NEXT_CMD(success)
-   */
-  ReceiverState sendFileChunks(ThreadData &data);
-  /**
-   * Sends global checkpoints to sender
-   * Previous states : PROCESS_DONE_CMD,
-   *                   WAIT_FOR_FINISH_OR_ERROR
-   * Next states : READ_NEXT_CMD(success),
-   *               ACCEPT_WITH_TIMEOUT(socket write failure)
-   */
-  ReceiverState sendGlobalCheckpoint(ThreadData &data);
-  /**
-   * Sends DONE to sender, also tries to read back ack. If anything fails during
-   * this state, doneSendFailure_ thread variable is set. This flag makes the
-   * state machine behave differently, effectively bypassing all session related
-   * things.
-   * Previous states : SEND_LOCAL_CHECKPOINT,
-   *                   WAIT_FOR_FINISH_OR_ERROR
-   * Next states : END(success),
-   *               ACCEPT_WITH_TIMEOUT(failure)
-   */
-  ReceiverState sendDoneCmd(ThreadData &data);
-
-  /**
-   * Sends ABORT cmd back to the sender
-   * Previous states : PROCESS_FILE_CMD
-   * Next states : WAIT_FOR_FINISH_WITH_THREAD_ERROR
-   */
-  ReceiverState sendAbortCmd(ThreadData &data);
-
-  /**
-   * Waits for transfer to finish or new checkpoints. This state first
-   * increments waitingThreadCount_. Then, it
-   * waits till all the threads have finished. It sends periodic WAIT signal to
-   * prevent sender from timing out. If a new checkpoint is found, we move to
-   * SEND_GLOBAL_CHECKPOINTS state.
-   * Previous states : PROCESS_DONE_CMD
-   * Next states : SEND_DONE_CMD(all threads finished),
-   *               SEND_GLOBAL_CHECKPOINTS(if new checkpoints are found),
-   *               ACCEPT_WITH_TIMEOUT(if socket write fails)
-   */
-  ReceiverState waitForFinishOrNewCheckpoint(ThreadData &data);
-
-  /**
-   * Waits for transfer to finish. Only called when there is an error for the
-   * thread. It adds a checkpoint to the global list of checkpoints if a
-   * connection was received. It increments waitingWithErrorThreadCount_ and
-   * waits till the session ends.
-   * Previous states : Almost all states
-   * Next states : END
-   */
-  ReceiverState waitForFinishWithThreadError(ThreadData &data);
-
-  /// Mapping from receiver states to state functions
-  static const StateFunction stateMap_[];
-
   /// Responsible for basic setup and starting threads
   void start();
-
-  /// This method is the entry point for each thread.
-  void receiveOne(int threadIndex, ServerSocket &s, int64_t bufferSize,
-                  TransferStats &threadStats);
 
   /**
    * Periodically calculates current transfer report and send it to progress
@@ -438,38 +146,14 @@ class Receiver : public WdtBase {
    */
   std::vector<Checkpoint> getNewCheckpoints(int startIndex);
 
-  /// Returns true if all threads finished for this session
-  bool areAllThreadsFinished(bool checkpointAdded);
-
-  /// Ends current global session
-  void endCurGlobalSession();
-
-  /**
-   * Returns if a new session has started and the thread is not aware of it
-   * A thread must hold lock on mutex_ before calling this
-   */
-  bool hasNewSessionStarted(ThreadData &data);
-
   /**
    * Start new transfer by incrementing transferStartedCount_
    * A thread must hold lock on mutex_ before calling this
    */
-  void startNewGlobalSession(ThreadData &data);
+  void startNewGlobalSession(const std::string &peerIp);
 
-  /**
-   * Returns whether the current session has finished or not.
-   * A thread must hold lock on mutex_ before calling this
-   */
-  bool hasCurSessionFinished(ThreadData &data);
-
-  /// Starts a new session for the thread
-  void startNewThreadSession(ThreadData &data);
-
-  /// Ends current thread session
-  void endCurThreadSession(ThreadData &data);
-
-  /// Increments failed thread count, does not wait for transfer to finish
-  void incrFailedThreadCountAndCheckForSessionEnd(ThreadData &data);
+  /// Ends current global session
+  void endCurGlobalSession();
 
   /**
    * Get transfer report, meant to be called after threads have been finished
@@ -515,24 +199,7 @@ class Receiver : public WdtBase {
    * it has to be made sure that these threads are joined at least before
    * the destruction of this object.
    */
-  std::vector<std::thread> receiverThreads_;
-
-  /**
-   * start() gives each thread the instance of the serversocket, these
-   * sockets can be closed and changed completely by the progress tracker
-   * thread thus ending any hope of receiver threads doing any further
-   * successful transfer
-   */
-  std::vector<ServerSocket> threadServerSockets_;
-
-  /**
-   * Bunch of stats objects given to each thread by the root thread
-   * so that finish() can summarize the result at the end of joining.
-   */
-  std::vector<TransferStats> threadStats_;
-
-  /// Per thread perf report
-  std::vector<PerfStatReport> perfReports_;
+  std::vector<std::unique_ptr<ReceiverThread>> receiverThreads_;
 
   /// Transfer log manager
   TransferLogManager transferLogManager_;
@@ -555,21 +222,6 @@ class Receiver : public WdtBase {
   /// Global list of checkpoints
   std::vector<Checkpoint> checkpoints_;
 
-  /// Number of threads which failed in the transfer
-  int failedThreadCount_{0};
-
-  /// Number of threads which are waiting for finish or new checkpoint
-  int waitingThreadCount_{0};
-
-  /// Number of threads which are waiting with an error
-  int waitingWithErrorThreadCount_{0};
-
-  /// Counter that is incremented each time a new session starts
-  int64_t transferStartedCount_{0};
-
-  /// Counter that is incremented each time a new session ends
-  int64_t transferFinishedCount_{0};
-
   /// Total number of data bytes sender wants to transfer
   int64_t totalSenderBytes_{-1};
 
@@ -590,6 +242,8 @@ class Receiver : public WdtBase {
 
   /// Number of active threads, decremented every time a thread is finished
   int32_t numActiveThreads_{0};
+
+  std::shared_ptr<ThreadsController> threadsController_;
 
   /**
    * Mutex for the management of this instance, specifically to keep the

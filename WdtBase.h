@@ -220,6 +220,9 @@ class WdtBase {
   static std::string generateTransferId();
 
  protected:
+  /// Ports that the sender/receiver is running on
+  std::vector<int32_t> ports_;
+
   /// Global throttler across all threads
   std::shared_ptr<Throttler> throttler_;
 

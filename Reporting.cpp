@@ -131,6 +131,16 @@ TransferReport::TransferReport(const std::vector<TransferStats>& threadStats,
   }
 }
 
+TransferReport::TransferReport(TransferStats&& globalStats, double totalTime,
+                               int64_t totalFileSize)
+    : totalTime_(totalTime), totalFileSize_(totalFileSize) {
+  summary_ = std::move(globalStats);
+}
+
+TransferReport::TransferReport(TransferStats&& globalStats) {
+  summary_ = std::move(globalStats);
+}
+
 TransferReport::TransferReport(std::vector<TransferStats>& threadStats)
     : threadStats_(std::move(threadStats)) {
   for (const auto& stats : threadStats_) {
