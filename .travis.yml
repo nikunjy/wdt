@@ -38,8 +38,6 @@ script:
 
 before_install:
   - echo "Travis os name $TRAVIS_OS_NAME"
-  - python --version
-  - ./t1.py
   # will change PATH so we find cmake,...
   - source ./travis_${TRAVIS_OS_NAME}.sh
 

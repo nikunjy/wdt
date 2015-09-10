@@ -5,11 +5,10 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 import os
+import re
 import subprocess
 from time import sleep
 from time import time
-from urlparse import urlparse
-from urlparse import parse_qs
 from threading import Thread
 
 receiver_end_time = 0
@@ -38,9 +37,8 @@ def main():
                                         stdout=subprocess.PIPE)
 
     connection_url = receiver_process.stdout.readline().strip()
-    parse_result = urlparse(connection_url)
-    query_parse_result = parse_qs(parse_result.query)
-    port_to_block = query_parse_result['ports'][0].split(',')[0]
+    ports = re.search('ports=([0-9]+)', connection_url)
+    port_to_block = ports.group(1)
 
     # this sleep is needed to allow receiver to start listening. Otherwise,
     # nc will not be able to connect and the port will not be blocked
