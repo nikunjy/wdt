@@ -34,13 +34,14 @@ script:
   #- make -j 4 VERBOSE=1
   - make -j 4
   #- WDT_TEST_SYMLINKS=0 CTEST_OUTPUT_ON_FAILURE=1 make test
-  - ../wdt/t1.py
   - CTEST_OUTPUT_ON_FAILURE=1 make test
   # to see the full output/debug:
   #- ../wdt/wdt_e2e_simple_test.sh
 
 before_install:
   - echo "Travis os name $TRAVIS_OS_NAME"
+  - python --version
+  - ./t1.py
   # will change PATH so we find cmake,...
   - source ./travis_${TRAVIS_OS_NAME}.sh
 
