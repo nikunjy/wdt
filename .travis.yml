@@ -32,9 +32,10 @@ script:
   #- make -j 4 VERBOSE=1
   - make -j 4
   #- WDT_TEST_SYMLINKS=0 CTEST_OUTPUT_ON_FAILURE=1 make test
-  - CTEST_OUTPUT_ON_FAILURE=1 make test
+  #- CTEST_OUTPUT_ON_FAILURE=1 make test
   # to see the full output/debug:
-  #- ../wdt/wdt_e2e_simple_test.sh
+  - ../wdt/wdt_e2e_simple_test.sh
+  - ../wdt/wdt_port_block_test.py
 
 before_install:
   - echo "Travis os name $TRAVIS_OS_NAME"

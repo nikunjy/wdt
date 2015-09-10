@@ -41,7 +41,7 @@ echo "WDT_TEST_SYMLINKS=$WDT_TEST_SYMLINKS"
 # Verbose / to debug failure:
 #WDTBIN="_bin/wdt/wdt -minloglevel 0 -v 99"
 # Normal:
-WDTBIN_OPTS="-minloglevel=0 -sleep_millis 1 -max_retries 999 -full_reporting "\
+WDTBIN_OPTS="-v=1 -minloglevel=0 -sleep_millis 1 -max_retries 999 -full_reporting "\
 "-avg_mbytes_per_sec=3000 -max_mbytes_per_sec=3500 -start_port=0 "\
 "-num_ports=4 -throttler_log_time_millis=200 -enable_checksum=true"
 WDTBIN="_bin/wdt/wdt $WDTBIN_OPTS"
@@ -95,7 +95,7 @@ if [ $WDT_TEST_SYMLINKS -eq 1 ]; then
 fi
 
 
-CMD="$WDTBIN -minloglevel=0 -directory $DIR/dst 2> $DIR/server.log | head -1 | \
+CMD="$WDTBIN -directory $DIR/dst 2> $DIR/server.log | head -1 | \
     xargs -I URL $WDTBIN -directory $DIR/src -connection_url URL 2>&1 | \
     tee $DIR/client1.log"
 echo "First transfer: $CMD"
@@ -104,7 +104,7 @@ STATUS=$?
 # TODO check for $? / crash... though diff will indirectly find that case
 
 if [ $WDT_TEST_SYMLINKS -eq 1 ]; then
-  CMD="$WDTBIN -minloglevel=0 -directory $DIR/dst_symlinks 2>> $DIR/server.log |\
+  CMD="$WDTBIN -directory $DIR/dst_symlinks 2>> $DIR/server.log |\
     head -1 | xargs -I URL $WDTBIN -follow_symlinks -directory $DIR/src \
     -connection_url URL 2>&1 | tee $DIR/client2.log"
   echo "Second transfer: $CMD"
