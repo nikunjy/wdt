@@ -1,9 +1,7 @@
 sudo: false
 
-language: cpp,python
+language: cpp
 
-python:
-  - "2.6"
 os:
   - linux
   - osx
