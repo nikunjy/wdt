@@ -2,6 +2,8 @@ sudo: false
 
 language: cpp
 
+python:
+  - "2.6"
 os:
   - linux
   - osx
@@ -20,7 +22,6 @@ addons:
       - g++-4.9
       - clang-3.6
       - libboost-system1.55-dev
-      - python
 
 script:
   # Debug
